@@ -1,0 +1,113 @@
+# 買い物リスト自動整理（Google Keep風）
+# ・タイトルが「【買い物】」で始まるIssueが対象
+# ・チェックした項目は自動で下の「チェック済み」へ移動、外すと上に戻る
+# ・コメントに書いた項目（1行1項目）は自動でリストに追加され、コメントは消える
+name: 買い物リスト
+
+on:
+  issues:
+    types: [edited]
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: write
+
+concurrency:
+  group: shopping-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  tidy:
+    if: >-
+      startsWith(github.event.issue.title, '【買い物】') &&
+      !github.event.issue.pull_request &&
+      github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const TITLE_PREFIX = '【買い物】';
+            const TASK_RE = /^\s*[-*+]\s+\[( |x|X)\]\s+(.*)$/;
+            const CHECKED_HEADER_RE = /^\*\*✅ チェック済み/;
+            const MARKER = '<!-- shopping-list:checked -->';
+
+            const norm = (s) => s.normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase();
+
+            function parse(body) {
+              const memo = [];
+              const items = [];
+              for (const raw of (body || '').split(/\r?\n/)) {
+                const m = raw.match(TASK_RE);
+                if (m) {
+                  const text = m[2].trim();
+                  if (text) items.push({ checked: m[1] !== ' ', text });
+                  continue;
+                }
+                const t = raw.trim();
+                if (!t || t === '---' || t === MARKER || CHECKED_HEADER_RE.test(t)) continue;
+                memo.push(raw);
+              }
+              return { memo, items };
+            }
+
+            function render({ memo, items }) {
+              const open = items.filter((i) => !i.checked);
+              const done = items.filter((i) => i.checked);
+              const out = [];
+              if (memo.length) out.push(...memo, '');
+              out.push(...open.map((i) => `- [ ] ${i.text}`));
+              if (done.length) {
+                out.push('', '---', MARKER, `**✅ チェック済み（${done.length}）**`, '');
+                out.push(...done.map((i) => `- [x] ${i.text}`));
+              }
+              return out.join('\n').trim() + '\n';
+            }
+
+            function parseComment(body) {
+              return (body || '')
+                .split(/\r?\n/)
+                .map((l) => l.replace(/^\s*(?:[-*+・]\s*)?(?:\[[ xX]\]\s*)?/, '').trim())
+                .filter((l) => l.length > 0 && l.length <= 200);
+            }
+
+            // 新しい項目は未チェックの末尾へ。チェック済みに同じものがあれば、未チェックに戻す。
+            function addItems(state, texts) {
+              for (const text of texts) {
+                const idx = state.items.findIndex((i) => norm(i.text) === norm(text));
+                if (idx >= 0) {
+                  if (!state.items[idx].checked) continue;
+                  const [item] = state.items.splice(idx, 1);
+                  item.checked = false;
+                  state.items.push(item);
+                } else {
+                  state.items.push({ checked: false, text });
+                }
+              }
+            }
+
+            async function main({ github, context }) {
+              const { owner, repo } = context.repo;
+              const issue_number = context.payload.issue.number;
+              const { data: issue } = await github.rest.issues.get({ owner, repo, issue_number });
+              if (!issue.title.startsWith(TITLE_PREFIX)) return;
+
+              const state = parse(issue.body);
+
+              // コメントを全部拾って項目に変換（取りこぼし防止のため、トリガー元以外も処理）
+              const comments = (
+                await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number, per_page: 100 })
+              ).filter((c) => c.user && c.user.type !== 'Bot');
+              for (const c of comments) addItems(state, parseComment(c.body));
+
+              const newBody = render(state);
+              if (newBody.trim() !== (issue.body || '').replace(/\r\n/g, '\n').trim()) {
+                await github.rest.issues.update({ owner, repo, issue_number, body: newBody });
+              }
+              for (const c of comments) {
+                await github.rest.issues.deleteComment({ owner, repo, comment_id: c.id });
+              }
+            }
+
+            await main({ github, context });
