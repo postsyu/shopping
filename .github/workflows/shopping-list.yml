@@ -2,6 +2,7 @@
 # ・タイトルが「【買い物】」で始まるIssueが対象
 # ・チェックした項目は自動で下の「チェック済み」へ移動、外すと上に戻る
 # ・コメントに書いた項目（1行1項目）は自動でリストに追加され、コメントは消える
+# ・追加されるのはリポジトリ所有者・共同編集者のコメントだけ（他人のコメントは無視）
 name: 買い物リスト
 
 on:
@@ -98,7 +99,7 @@ jobs:
               // コメントを全部拾って項目に変換（取りこぼし防止のため、トリガー元以外も処理）
               const comments = (
                 await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number, per_page: 100 })
-              ).filter((c) => c.user && c.user.type !== 'Bot');
+              ).filter((c) => c.user && c.user.type !== 'Bot' && ['OWNER', 'COLLABORATOR', 'MEMBER'].includes(c.author_association));
               for (const c of comments) addItems(state, parseComment(c.body));
 
               const newBody = render(state);
